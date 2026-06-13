@@ -3,7 +3,7 @@ name: Shared Build and Scan Template
 on:
   workflow_call:
     inputs:
-      image:
+      image_tag:
         required: true
         type: string
     secrets:
@@ -27,8 +27,8 @@ jobs:
 
       - name: Build and Push Docker Image
         run: |
-          docker build -t ${{ inputs.image }} .
-          docker push ${{ inputs.image }}
+          docker build -t docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }} .
+          docker push docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }}
 
   scan:
     needs: build
@@ -37,8 +37,32 @@ jobs:
       - name: Run Trivy Vulnerability Scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ inputs.image }}
+          image-ref: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }}
           format: 'table'
-          exit-code: '1' # 1 means: "If you find HIGH/CRITICAL bugs, crash the pipeline!"
+          exit-code: '1'
           ignore-unfixed: true
           severity: 'HIGH,CRITICAL'
+
+  # PHASE 4: The GitOps Automation Loop
+  update-manifest:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Consumer Repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # Built-in GitHub token to allow pushing back
+
+      - name: Update Image Tag in Argo Manifest
+        run: |
+          # Using sed to find the repository line and dynamically update or append a tag if needed
+          # Or if you track image tags directly in your values block:
+          sed -i "s|image:.*|image: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }}|g" argocd/genesis-app.yaml
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add argocd/genesis-app.yaml
+          git commit -m "chore(ci): bump genesis image tag to ${{ inputs.image_tag }} [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
