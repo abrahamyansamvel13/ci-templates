@@ -1,4 +1,4 @@
-name: Shared Build and Scan Template
+name: Centralized Build, Scan, and Delivery
 
 on:
   workflow_call:
@@ -19,6 +19,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: actions/setup-docker-actions@v1
+        with:
+          version: latest
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -26,9 +31,11 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and Push Docker Image
-        run: |
-          docker build -t docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }} .
-          docker push docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }}
 
   scan:
     needs: build
@@ -43,26 +50,23 @@ jobs:
           ignore-unfixed: true
           severity: 'CRITICAL'
 
-  # PHASE 4: The GitOps Automation Loop
   update-manifest:
     needs: scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Consumer Repo
+      - name: Checkout Consumer Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }} # Built-in GitHub token to allow pushing back
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update Image Tag in Argo Manifest
+      - name: Update Image Tag in Helm Values
         run: |
-          # Using sed to find the repository line and dynamically update or append a tag if needed
-          # Or if you track image tags directly in your values block:
-          sed -i "s|image:.*|image: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/genesis:${{ inputs.image_tag }}|g" argocd/genesis-app.yaml
+          sed -i 's|tag: ".*"|tag: "${{ inputs.image_tag }}"|g' genesis-chart/values.yaml
 
       - name: Commit and Push Changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add argocd/genesis-app.yaml
-          git commit -m "chore(ci): bump genesis image tag to ${{ inputs.image_tag }} [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
+          git add genesis-chart/values.yaml
+          git diff-index --quiet HEAD || git commit -m "chore(gitops): bump container image tag to ${{ inputs.image_tag }}"
+          git push origin ${{ github.event.pull_request.head.ref || github.ref_name }}
